@@ -14,14 +14,15 @@ In this study, the topic that will be investigated and forecasted will be gold p
 
 * Time Series Analysis
 * Predicitve Modeling
+* Simple Moving Average
 * ARIMA
-* Logistic Regression 
-* Facebook Prophet
+* Logistic Regression for Time Series
+* Facebook Prophet Model
 
 ### Technologies
 
 * R
-* Excel
+* R Studio
 
 ### Project Description 
 
