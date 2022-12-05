@@ -1,0 +1,1153 @@
+---
+title: "Forecasting the Price of Gold"
+author: "Amin Fesharaki, Ryan Dunn, Kyle Dalope"
+date: "11/2022"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup}
+library(caret)
+library(corrplot)
+library(dplyr)
+library(DT)
+library(fpp2)
+library(ggplot2)
+library(gtrendsR)
+library(imputeTS)
+library(lubridate)
+library(Metrics)
+library(plotly)
+library(prophet)
+library(Quandl)
+library(quantmod)
+library(readr)
+library(rvest)
+library(stringr)
+library(tidymodels)
+library(tidyr)
+library(tidytext)
+library(zoo)
+```
+
+
+## Load Data
+```{r}
+# Load Data
+
+gold <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/Gold.csv", 
+    col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+
+unemp <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/UNRATE.csv", show_col_types = FALSE)
+
+M2 <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/WM2NS.csv", show_col_types = FALSE)
+
+DJ <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/DJIA.csv",  show_col_types = FALSE)                
+
+fed_funds <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/DFF.csv", show_col_types = FALSE)
+
+silver <- Quandl('LBMA/SILVER')
+
+dollar_index <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/US Dollar Index Historical Data.csv", col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+
+Google <- read_csv("/Users/datascience/Desktop/Time Series Data Science/Time Series Project/Update/Gold_Trend_hits.csv", show_col_types = FALSE)
+```
+
+## Create Candlestick/volume graph of gold
+```{r, warning=FALSE}
+#edit the column names in data frames 
+Price_plot <- gold %>%
+  plot_ly(x = ~Date,
+          type = "candlestick", 
+          open = ~Open, 
+          close = ~`Close/Last`, 
+          high = ~High,
+          low = ~Low,
+          name = "price") %>%
+  layout(
+    xaxis = list(
+      rangeselector = list(
+        buttons = list(
+          list(
+            count = 3,
+            label = "3 mo",
+            step = "month",
+            stepmode = "backward"),
+          list(
+            count = 6,
+            label = "6 mo",
+            step = "month",
+            stepmode = "backward"),
+          list(
+            count = 1,
+            label = "1 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 2,
+            label = "2 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 3,
+            label = "3 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 5,
+            label = "5 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(step = "all"))),
+      
+      rangeslider = list(visible = FALSE)),
+         yaxis = list(title = "Price ($)",
+                      showgrid = TRUE,
+                      showticklabels = TRUE))
+Volume <- select(gold, Date, Volume)
+Volume$Date <- as.Date(Volume$Date , format = "%m/%d/%y")
+Volume$Vol <- as.numeric(as.character(Volume$Volume)) / 1000
+Volume_plot <- Volume %>%
+  plot_ly(x=~Date, y=~Vol, type='bar', name = "Volume") %>%
+  layout(yaxis = list(title = "Volume (Units of Thousand)"))
+plot <- subplot(Price_plot, Volume_plot, heights = c(0.7,0.3), nrows=2,
+             shareX = TRUE, titleY = TRUE) %>%
+  layout(title = 'GC:CMX')
+plot
+```
+
+## Adjust data types where needed 
+```{r}
+#change data type from chr to date in the gold data set
+gold$Date <- as.Date(gold$Date, format = "%m/%d/%y")
+gold$DATE <- gold$Date
+#change the datatype to date in the DJIA data set
+DJ$DATE <- as.Date(DJ$DATE, format = "%m/%d/%y")
+#indicate columns to keep in gold data set
+keep_cols <-  c("Date","Close/Last", 'Volume')
+gold <- gold[keep_cols] 
+gold <- gold %>%
+  rename(Gold_Close = 'Close/Last', Gold_Volume ='Volume')
+```
+## Create the daily M2 rate data frame (in billions)
+```{r}
+#create all dates from the date column in the data frame
+all_dates <- M2 %>%select(DATE) %>% 
+  complete(DATE=  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+M2_daily <- left_join(all_dates,M2,by="DATE")
+#fill the NA values from the join with the first value from the dataset
+M2_daily <- na_locf(M2_daily, option = "locf")
+keep_cols <- c("DATE", "WM2NS")
+M2_daily <- M2_daily[keep_cols]
+M2_daily <- M2_daily %>%
+  select(c("DATE","WM2NS")) %>%
+  rename(Date = DATE)
+
+```
+
+## Create the daily unemployment rate data frame
+```{r}
+#create all dates from the date column in the dataframe
+all_dates <- unemp %>%select(DATE) %>% 
+  complete(DATE=  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+unemp_daily <- left_join(all_dates,unemp,by="DATE")
+#fill the NA values from the join with the first value from the dataset
+unemp_daily <- na_locf(unemp_daily,  option = "locf")
+keep_cols <- c("DATE", "UNRATE")
+unemp_daily <- unemp_daily[keep_cols]
+unemp_daily <- unemp_daily %>%
+  select(c("DATE","UNRATE")) %>%
+  rename(Date = DATE)
+```
+
+## Create the daily federal funds data frame
+```{r}
+#create all dates from the date column in the data frame
+all_dates <- fed_funds %>%select(observation_date) %>% 
+  complete(observation_date =  seq.Date(min(observation_date), max(observation_date), by="day"),
+           ) %>% mutate(TIME=paste(year(observation_date),str_pad(month(observation_date), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original dataframe
+ff_daily <- left_join(all_dates,fed_funds,by="observation_date")
+#fill the NA values from the join with the first value from the dataset
+ff_daily <- na_locf(ff_daily, option = "locf")
+keep_cols <- c("observation_date", "DFF")
+ff_daily <- ff_daily[keep_cols]
+ff_daily <- ff_daily %>%
+  select(c("observation_date","DFF")) %>%
+  rename(Date = observation_date)
+```
+## Create the daily Dow Jones IA data frame
+```{r}
+
+#create all dates from the date column in the data frame
+all_dates <- DJ %>%select(DATE) %>% 
+  complete(DATE =  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+dj_daily <- left_join(all_dates, DJ ,by="DATE")
+
+#fill the NA values from the join with the first value from the dataset
+dj_daily <- na_locf(dj_daily,  option = "locf")
+keep_cols <- c("DATE", "DJIA")
+dj_daily <- dj_daily[keep_cols]
+dj_daily <- dj_daily %>%
+  select(c("DATE", "DJIA")) %>%
+  rename(Date = DATE)
+
+```
+
+## Create the daily Silver Price data frame
+```{r}
+# add in Silver
+silver <- silver[,c('Date', 'USD')]
+silver <- silver %>%
+  rename(Silver_Close = 'USD')
+# Join Silver and Gold Data
+Metals <- inner_join(silver, gold, by="Date")
+```
+
+## Create the Dollar Index Price data frame
+```{r}
+# Add in Dollar Index
+dollar_index <- dollar_index %>%
+  select(c("Date","Price")) %>%
+  rename(DXY = Price)
+```
+
+## Google trends to find hits on Gold worlwide
+```{r}
+#trends <- gtrends(keyword = "Gold", onlyInterest = TRUE, time = "today+5-y")
+
+#create all dates from the date column in the data frame
+all_dates <- Google %>%select(Date) %>% 
+  complete(Date =  seq.Date(min(Date), max(Date), by="day"),
+           ) %>% mutate(TIME=paste(year(Date),str_pad(month(Date), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+Google_daily <- left_join(all_dates, Google ,by="Date")
+#fill the NA values from the join with the first value from the dataset
+Google_daily <- na_locf(Google_daily,  option = "locf")
+
+# Create Daily Data Fame
+keep_cols <- c("Date", "Gold: (Worldwide)")
+Google_daily <- Google_daily[keep_cols]
+Google_daily <- Google_daily %>%
+  select(c("Date", "Gold: (Worldwide)")) %>%
+  rename(hits = 'Gold: (Worldwide)')
+Google_daily %>%  
+  plot_ly(type='scatter',x=~Date, y=~hits, mode = 'lines', name = "Google Search Trends") %>%
+  layout(title = paste0("Interest over Time: ", "Gold"), yaxis = list(title = "hits"))
+trends_daily <- Google_daily
+# Hits verse Gold 
+trends_daily %>%
+  left_join(gold, by = "Date") %>%
+  select(one_of(c("Date", "hits", "Gold_Close"))) %>%
+  drop_na() %>%
+  ggplot(aes(hits, Gold_Close)) + geom_point(color="red") + geom_smooth(method = 'loess') +
+  labs(title =paste0("Gold",": Relationship between World Interest (Hits) and Close Price (Gold)"))
+
+```
+## Merge data frames and create the final dataframe for EDA
+```{r}
+#merge the dataframes together on dates
+full_df <- left_join(Metals, dollar_index, by="Date")
+full_df <- left_join(full_df, unemp_daily, by="Date")
+full_df <- left_join(full_df, ff_daily, by="Date")
+full_df <- left_join(full_df, M2_daily, by="Date")
+full_df <- left_join(full_df, Google_daily, by="Date")
+full_df <- left_join(full_df, dj_daily, by="Date")
+full_df <- left_join(full_df, trends_daily, by="Date")
+full_df$Gold_Volume <- na_ma(full_df$Gold_Volume, k=1, weighting = "simple")
+keep_cols <- c("Date", "Silver_Close", "Gold_Close","Gold_Volume", "DXY", "UNRATE", "DFF", "WM2NS" ,"hits.x",     "DJIA")     
+full_df <- full_df[keep_cols]
+full_df <- full_df %>%
+  rename(hits = hits.x)
+```
+
+```{r}
+# Check for any NA Values
+cbind(
+   lapply(
+     lapply(full_df, is.na)
+     , sum)
+   )
+```
+## Subset the data frame with values from 2018 forward
+```{r}
+full_df <- full_df %>% arrange(ymd(full_df$Date))
+full_df <- full_df[full_df$Date >= "2018-01-01",]
+#Replace NA with the most recent value 
+full_df$WM2NS <- zoo::na.fill(full_df$WM2NS, "extend")
+full_df$hits <- zoo::na.fill(full_df$hits, "extend")
+full_df$UNRATE <- zoo::na.fill(full_df$UNRATE, "extend")
+tail(full_df)
+```
+```{r}
+# Check for any NA Values
+cbind(
+   lapply(
+     lapply(full_df, is.na)
+     , sum)
+   )
+```
+
+## Create the correlation matrix for EDA 
+```{r}
+corr_fields <- c("Gold_Close", "Silver_Close","Gold_Volume", "DXY", "UNRATE", "DFF", "WM2NS" ,"hits", "DJIA")     
+full_df$Gold_Volume <- as.numeric(full_df$Gold_Volume)
+full_df$WM2NS <- as.numeric(full_df$WM2NS)
+full_df$hits <- as.numeric(full_df$hits)
+
+full_df$Gold_Volume <- na_ma(full_df$Gold_Volume, k=1, weighting = "simple")
+full_df$WM2NS <- na_ma(full_df$WM2NS, k=1, weighting = "simple")
+full_df$hits <- na_ma(full_df$hits, k=1, weighting = "simple")
+```
+
+```{r}
+corr_df <- full_df[corr_fields]
+corr_matrix = cor(corr_df)
+#display first row of correlation matrix
+corr_matrix[,1]
+```
+```{r}
+#develop the corrplot correlation matrix
+corrplot(corr_matrix)
+```
+Silver Close, DFF, WM2NS, hits, and DIJA are strongly correlated with gold and therefore will be used as external regressors.
+## Normalize variables for EDA
+```{r}
+#normalize variables to view scaled relationships and add into full_df
+full_df_Norm <- full_df
+full_df_Norm[-1] <- lapply(full_df_Norm[-1], scale)
+```
+
+## EDA with non-normalized varialbes
+```{r}
+#scatterplot of gold & each external variable
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = UNRATE, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Unemployment Rate (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = DFF, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Federal Funds Rate (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = WM2NS, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and M2 Money Supply (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = DJIA, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and DJIA (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = Gold_Volume, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Gold Volume (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = Silver_Close, color = Date)) + 
+  ggtitle("Scatterplot of Gold_Close and Silver_Close (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = hits, color = Date)) + 
+  ggtitle("Scatterplot of Gold_Close and Hits (Date Color)")
+```
+
+## Create dataframe for Normalize EDA (on same axis)
+```{r}
+#create time series objects for each of the normalized data elements 
+gold_ts_norm <- ts(full_df_Norm$Gold_Close, start = c(2018, 01), frequency = 252)
+unemp_ts_norm <- ts(full_df_Norm$UNRATE, start = c(2018, 01), frequency = 252)
+ff_ts_norm <- ts(full_df_Norm$DFF, start = c(2018, 01), frequency = 252)
+M2_ts_norm <- ts(full_df_Norm$WM2NS, start = c(2018, 01), frequency = 252)
+dj_ts_norm <- ts(full_df_Norm$DJIA, start = c(2018, 01), frequency = 252)
+silver_ts_norm <- ts(full_df_Norm$Silver_Close, start = c(2018, 01), frequency = 252)
+hits_ts_norm <- ts(full_df_Norm$hits, start = c(2018, 01), frequency = 252)
+gold_vol_ts_norm <- ts(full_df_Norm$Gold_Volume, start = c(2018, 01), frequency = 252)
+```
+
+## Create time series plots of all factors
+```{r}
+#line chart of all indicators
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Unemployment Rate", xlab = "Date") + 
+  autolayer(unemp_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Federal Funds Rate", xlab = "Date") + 
+  autolayer(ff_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold Close and M2", xlab = "Date") + 
+  autolayer(M2_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and DJIA", xlab = "Date") + 
+  autolayer(dj_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Silver Close", xlab = "Date") + 
+  autolayer(silver_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Hits", xlab = "Date") + 
+  autolayer(hits_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Gold Volume", xlab = "Date") + 
+  autolayer(gold_vol_ts_norm) + theme_classic()
+
+
+
+```
+
+#### Boxplot to identify outlier variables 
+```{r}
+#boxplot of all varialbes  
+ggplot(corr_df, aes(x=Gold_Close)) +
+  geom_boxplot() + ggtitle("Gold Boxplot") + xlab("Gold Closing Price")
+
+ggplot(corr_df, aes(x=UNRATE)) +
+  geom_boxplot() + ggtitle("Unemployement Rate Boxplot") + xlab("Unemployement Rate")
+
+ggplot(corr_df, aes(x=DFF)) +
+  geom_boxplot() + ggtitle("Federal Funds Rate Boxplot") + xlab("Federal Funds Rate")
+
+ggplot(corr_df, aes(x=WM2NS)) +
+  geom_boxplot() + ggtitle("M2 Money Supply Boxplot") + xlab("M2 Total Money Supply")
+
+ggplot(corr_df, aes(x=DJIA)) +
+  geom_boxplot() + ggtitle("DJIA Boxplot") + xlab("Dow Jones Industrial Average")
+
+ggplot(corr_df, aes(x=Gold_Volume)) +
+  geom_boxplot() + ggtitle("Gold Volume Boxplot") + xlab("Gold Volume")
+
+ggplot(corr_df, aes(x=Silver_Close)) +
+  geom_boxplot() + ggtitle("Silver Close Boxplot") + xlab("Silver Close")
+
+ggplot(corr_df, aes(x=hits)) +
+  geom_boxplot() + ggtitle("Hits Boxplot") + xlab("Hits")
+```
+
+## Full entire Dataset
+
+```{r}
+FULL_df  <- left_join(full_df, full_df_Norm, by="Date")
+```
+
+## Partition the data into training and testing
+```{r}
+#create the time series object for the FULL_df
+ts_FULL_df <- ts(data=FULL_df$Gold_Close.x, start = c(2018,01), frequency = 252)
+train_df <- window(ts_FULL_df, end = c(2022,150)) #161 is end of Aug
+test_df <-  window(ts_FULL_df, start = c(2022,151))
+#validate the train and test layers connect
+autoplot(train_df) + autolayer(test_df) +
+  #coord_cartesian(xlim = c(2022,2023)) +
+  labs(title = "2022 - 2023 Gold Close Price (Train & Test)",
+       x = "Time", y = "Gold Close Price")
+test_df
+```
+
+
+```{r}
+#moving average model
+nValid <- 12
+ma.trailing <- rollmean(train_df, k = 12, align = "right")
+last.ma <- tail(ma.trailing, 1)
+ma.trailingTEST <- ts(rep(last.ma, nValid), test_df, freq = 12)
+
+plot(train_df, ylim = c(1100, 2200), ylab = "Gold Close Price", xlab = "Time", xlim = c(2018, 2023), main = "")
+axis(1, at = seq(2018, 2023, 1), labels = format(seq(2018, 2023, 1)))
+lines(ma.trailing, lwd = 2, col = "red", lty = 2)
+lines(ma.trailingTEST, lwd = 2, col = "blue", lty = 2)
+lines(test_df)
+
+summary(ma.trailingTEST)
+
+```
+
+```{r}
+#Simple Moving Average with QUANTMOD
+getSymbols("GOLD", from = "2018-01-02")
+chartSeries(GOLD)
+addSMA(50)
+
+ma <- SMA(Cl(GOLD), 50) # ma of adjusted close
+#accuracy(Cl(GOLD), ma)
+```
+
+## Full entire Dataset
+
+```{r}
+FULL_df  <- left_join(full_df, full_df_Norm, by="Date")
+FULL_df %>% arrange(mdy(FULL_df$Date))
+
+FULL_df$difference <- c(NA, diff(FULL_df$Gold_Close.x))
+FULL_df$diff_boolean <- ifelse(FULL_df$difference >= 0,1,0)
+head(FULL_df)
+```
+### Partition the data into training and testing
+```{r}
+#create the time series object for the FULL_df
+ts_FULL_df <- ts(data=FULL_df$Gold_Close.x, start = c(2018,01), frequency = 252)
+
+train_df <- window(ts_FULL_df, start = c(2018,01), end = c(2022,186)) #186 is Oct 31
+test_df <-  window(ts_FULL_df, start = c(2022,187))
+  
+#validate the train and test layers connect
+autoplot(train_df) + autolayer(test_df) + 
+  labs(title = "2022 - 2023 Gold Close Price (Train & Test)",
+       x = "Time", y = "Gold Close Price") 
+
+head(train_df) 
+```
+
+#### Auto ARIMA Model 1 (Gold Close Price Only ) - Proof of Random Walk
+```{r}
+#ARIMA Model #1
+auto_model <- auto.arima(train_df)
+summary(auto_model)
+
+#investigate the potential parameters of the ARIMA model
+acf(train_df, lag.max = 252)
+pacf(train_df, lag.max = 252)
+```
+
+```{r}
+#fit to the test data
+sqrt(mean(auto_model$residuals^2))
+
+#accuracy(forecast(auto_model, h = 15), test_df)
+
+gold_pred <- forecast(auto_model, h = 15)
+#gold_pred
+
+autoplot(train_df) + autolayer(test_df) + autolayer(gold_pred, alpha = 0.5) +coord_cartesian(c(2022,2023))
+```
+ 
+
+#### Logistic Regression Model #1 (All Predictors)
+```{r}
+#logistic regression model # 1
+
+#columns to keep
+keep_cols <- c("Date","Gold_Close.x","Silver_Close.x","DXY.x","UNRATE.x","DFF.x", "hits.x","DJIA.x","WM2NS.x", "diff_boolean")
+lr_df <- FULL_df[keep_cols]
+head(lr_df)
+```
+```{r}
+#create train and test
+lr_train <- lr_df[lr_df$Date <= "2022-10-31",]
+lr_actual <- lr_df[lr_df$Date > "2022-10-31",]
+lr_actual_gold <- lr_df[lr_df$Date > "2022-10-31",]
+```
+
+
+```{r}
+#create the logistic regression model with all predictors 
+set.seed(100)
+gold_lr_model <- glm(diff_boolean ~  Silver_Close.x + DXY.x+ UNRATE.x + DFF.x + hits.x + DJIA.x + WM2NS.x , lr_train,
+                    family = "binomial")
+
+#summarize the model output
+summary(gold_lr_model)
+gold_lr_model
+```
+
+```{r}
+#generate the predictions of the lr model
+gold_pred_prob <- predict(gold_lr_model, newdata = lr_actual, type = "response")
+gold_pred_df <- cbind(lr_actual, gold_pred_prob)
+
+#identify columns to keep and create the gold boolean flag
+eval_cols <- c("Date","diff_boolean","gold_pred_prob")
+eval_df <- gold_pred_df[eval_cols]
+eval_df$gold_boolean <- ifelse(eval_df$gold_pred_prob >= .50,1,0)
+
+eval_df <- cbind(eval_df, lr_actual_gold$Gold_Close.x)
+eval_df
+```
+
+```{r}
+#create the confusion matrix for the LR model with all predictors
+confusionMatrix(data = as.factor(eval_df$diff_boolean), reference = as.factor(eval_df$gold_boolean), positive = "1")
+```
+
+#### Logistic Regresson Model #2 (with highly correlated features)
+```{r}
+#create the data frame of values with high correlation 
+high_corr_feat <- c("Date","Silver_Close.x","WM2NS.x","hits.x","DFF.x","diff_boolean")
+lr_df2 <- FULL_df[high_corr_feat]
+#head(lr_df2)
+```
+
+```{r}
+#create train and test sets
+lr_train2 <- lr_df2[lr_df2$Date <= "2022-10-31",]
+lr_actual2 <- lr_df2[lr_df2$Date > "2022-10-31",]
+```
+
+```{r}
+#create the logistic regression model with high only correlated predictors
+set.seed(100)
+#gold_lr_model2 <- glm(diff_boolean ~  Silver_Close.x  + DFF.x + hits.x + DJIA.x + WM2NS.x , lr_train2,
+#                    family = "binomial")
+gold_lr_model2 <- glm(diff_boolean ~  Silver_Close.x   + WM2NS.x , lr_train2,
+                    family = "binomial")
+#summarize the model output
+summary(gold_lr_model2)
+gold_lr_model2
+```
+
+```{r}
+#generate the predictions of the lr_model2
+gold_pred_prob2 <- predict(gold_lr_model2, newdata = lr_actual2, type = "response")
+gold_pred_df2 <- cbind(lr_actual2, gold_pred_prob2)
+
+#identify columns to keep and create the gold boolean flag
+eval_cols2 <- c("Date","diff_boolean","gold_pred_prob2")
+eval_df2 <- gold_pred_df2[eval_cols2]
+eval_df2$gold_boolean <- ifelse(eval_df2$gold_pred_prob >= .50,1,0)
+
+eval_df2
+```
+The Logistic Regression model with only highly correlated features predicts all positive cases for the gold_boolean flag
+```{r}
+#return the distinct values of gold Boolean
+n_distinct(eval_df2$gold_boolean)
+```
+
+
+
+
+
+
+## Function to find local min and max for buy/sell signals 
+```{r}
+ # Locate Local Min and Max for buy/sell signals
+locate_xtrem <- function (x, last = FALSE)
+{
+  # use rle to deal with duplicates
+  x_rle <- rle(x)
+
+  # force the first value to be identified as an extrema
+  first_value <- x_rle$values[1] - x_rle$values[2]
+
+  #
+  # ! NOTE: with this method, last value will be considered as an extrema
+  diff_sign_rle <- c(first_value, diff(x_rle$values)) %>% sign() %>% rle()
+
+  # this vector will be used to get the initial positions
+  diff_idx <- cumsum(diff_sign_rle$lengths)
+
+  # find min and max
+  diff_min <- diff_idx[diff_sign_rle$values < 0]
+  diff_max <- diff_idx[diff_sign_rle$values > 0]
+
+  # get the min and max indexes in the original series
+  x_idx <- cumsum(x_rle$lengths)
+  if (last) {
+    min <- x_idx[diff_min]
+    max <- x_idx[diff_max]
+  } else {
+    min <- x_idx[diff_min] - x_rle$lengths[diff_min] + 1
+    max <- x_idx[diff_max] - x_rle$lengths[diff_max] + 1
+  }
+  # just get number of occurences
+  min_nb <- x_rle$lengths[diff_min]
+  max_nb <- x_rle$lengths[diff_max]
+
+  # format the result as a tibble
+  bind_rows(
+    tibble(Idx = min, Values = x[min], NB = min_nb, Status = "min"),
+    tibble(Idx = max, Values = x[max], NB = max_nb, Status = "max")) %>%
+    arrange(.data$Idx) %>%
+    mutate(Last = last) %>%
+    mutate_at(vars(.data$Idx, .data$NB), as.integer)
+}
+
+```
+
+## GOLD Prophet FORECAST BASELINE (No External Regressors)
+
+```{r}
+# Partition Data frame
+prophet.Train <- subset(FULL_df, Date < as.Date("2022-11-08"))
+Prophet.Test <- subset(FULL_df, Date >= as.Date("2022-11-17"))
+
+# Set training col for prophet forecast
+prophet.Train <- prophet.Train %>%
+  select(c("Date","Gold_Close.x")) %>%
+  rename(ds = Date, y = Gold_Close.x)
+
+# Prophet Predictions
+Prophet <- prophet(prophet.Train, interval.width = 0.95)
+future <- make_future_dataframe(Prophet, periods = 7) %>% filter(!wday(ds) %in% c(1,7)) #account for regular gaps on weekends
+Prophet_Forecast_base <- predict(Prophet, future) 
+
+# Grab necessary variables
+Forecast_subset <- Prophet_Forecast_base %>%
+  select(c('ds','yhat','yhat_lower','yhat_upper')) %>%
+  rename(Date = ds, ClosePrice = yhat , ClosePrice_lower = yhat_lower, ClosePrice_upper = yhat_upper)
+
+# Put into Dataframe
+datatable(Forecast_subset[c('Date','ClosePrice','ClosePrice_lower','ClosePrice_upper')])
+
+# Return prediction results from prophet forecast 
+Prophet_Results_base <- Prophet_Forecast_base %>%
+  select(c("ds","yhat")) %>%
+  rename(Date = ds, Close_Prediction = yhat)
+Prophet_Results_base$Date <- as.Date(Prophet_Results_base$Date , format = "%m/%d/%y")
+Prophet_Results_base <- subset(Prophet_Results_base, Date >= as.Date("2022-11-08"))
+
+# Grab actual gold data
+Gold_Results <- gold %>%
+  select(c("Date","Gold_Close"))  %>%
+  rename(Close_Actual = Gold_Close)
+ 
+# Join prediction and actual results for comparison
+results <- left_join(Prophet_Results_base, Gold_Results,  by="Date")
+results
+
+# Calculate RMSE 
+RMSE <- sqrt(mean((results$Close_Actual - results$Close_Prediction)^2))
+RMSE 
+
+```
+
+## Plot Baseline Prophet Forecast
+```{r}
+# Plot prophet forecast
+plot(Prophet, Prophet_Forecast_base, xlabel = "Date", ylabel = "Gold Close Price ($)") + ggtitle(paste0("Gold", ": Baseline Price Prediction"))
+
+# Plot actual
+p1 <- ggplot(results, aes(Date, Close_Actual, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Actual 1 Week  Price")
+
+# Plot Predicted  
+p2 <- ggplot(results, aes(Date, Close_Prediction, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Predicted 1 Week Gold Price")
+# Combine Predicted and Actual Plot 
+p <- p1 + 
+  geom_point(mapping=p1$mapping) +
+  geom_line(color='red') +
+  geom_point(mapping=p2$mapping)+
+  geom_line(mapping=p2$mapping, color='blue') +
+  ggtitle("Predicted(blue) vs Actual(red) - 1 week forecast Baseline")
+p
+
+# Plot prophet components  
+prophet_plot_components(Prophet, Prophet_Forecast_base)
+```
+## Buy/Sell Baseline Prophet Forecast
+```{r}
+results$Index <- seq(1, nrow(results), by=1)
+vec <- results$Close_Prediction
+x <- locate_xtrem(vec)
+x <- x %>% 
+  select(c('Idx', 'Status')) %>%
+  rename(Index = Idx)
+results <- left_join(results, x,  by="Index")
+results <- results %>% 
+  select(c('Date', 'Close_Prediction', 'Close_Actual', 'Status'))
+results["Status"][results["Status"] == "min"] <- "Buy"
+results["Status"][results["Status"] == "max"] <- "Sell"
+Profit <- na.omit(results)
+Profit <- Profit %>%  
+  mutate(price_diff = Close_Actual - lag(Close_Actual, default = first(Close_Actual))) %>%  
+  filter(Status == 'Sell')
+sum(Profit$price_diff) # TWEAK OR USE ONLINE CALC
+```
+
+## GOLD FORECAST WEEKLY ROLLOVER
+Idea is that if we want to forecast a week ahead, we can use last weeks external values (5 day lag) to forecast gold prices. All data will be known, but continuous forecast require weekly updates. The goal is to predict 1 week in advance, then training data gets expanded 1 week later with actual gold values, retrains model with actual data, and forecasts with 1 week lag predictors.
+```{r}
+# Create a new full data frame
+FULL_df1 <- subset(FULL_df, Date >= as.Date("2018-01-08"))
+
+# Lag External Regressors by 5 (1 week lag)
+FULL_df1$Silver_Close.x <- lag(FULL_df1$Silver_Close.x, n=5, default = NA)
+FULL_df1$DFF.x <- lag(FULL_df1$DFF.x, n=5, default = NA)
+FULL_df1$WM2NS.x <- lag(FULL_df1$WM2NS.x, n=5, default = NA)
+FULL_df1$hits.x <- lag(FULL_df1$hits.x, n=5, default = NA)
+FULL_df1$DJIA.x <- lag(FULL_df1$DJIA.x, n=5, default = NA)
+# Grab data frame to start at the beginning of the week (monday)
+FULL_df1 <- subset(FULL_df1, Date >= as.Date("2018-02-12"))
+
+# Store future dataframe (for prophet) with 1 week lag predictors 
+df_future <- FULL_df1 %>%
+  select(c('Date', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date)
+```
+
+
+## Gold 1 week rollover prophet forecast
+```{r}
+# Partition data
+prophet.Train <- FULL_df1[1:1160,]
+prophet.Test <- FULL_df1[1161:1164,] 
+Results <- data.frame()
+pred <- data.frame()
+# Jumps 4 days in advance
+stepsAhead <- 4
+# Predicting 4 weeks of forecasts
+periods_forecast <- 4
+length <- seq(4, stepsAhead * periods_forecast , by=stepsAhead)
+
+# Actual Gold Values
+Gold_Results <- gold %>%
+  select(c("Date","Gold_Close"))  %>%
+  rename(Close_Actual = Gold_Close)
+ 
+# Create a for loop to retrain model with a new training set
+for(i in length) {
+  df3 <- prophet.Train %>%
+  select(c('Date', 'Gold_Close.x', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date, y = Gold_Close.x)
+  # Add Regressors
+  m_ext <- prophet(seasonality.mode = "multiplicative", daily.seasonality = FALSE, interval.width = .90)
+  m_ext <- add_regressor(m_ext,  "Silver_Close.x", mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DFF.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'WM2NS.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'hits.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DJIA.x', mode = 'multiplicative', standardize = "auto")
+  # Fit Model
+  m_ext <- fit.prophet(m_ext, df3)
+  # Create future dataframe
+  future <- make_future_dataframe(m_ext, periods = 6, include_history = TRUE) %>% filter(!wday(ds) %in% c(1,7))
+  future <- left_join(future, df_future, by="ds")
+  # Forecast with model
+  forecast_weekly <- predict(m_ext, future) 
+  # Return Results and organize data
+  Prophet_Results <- forecast_weekly %>%
+  select(c("ds","yhat")) %>%
+  rename(Date = ds, Close_Prediction = yhat)
+  Prophet_Results <- Prophet_Results[(nrow(prophet.Train)+1:(nrow(prophet.Train)+stepsAhead + 1)),]
+  Prophet_Results <- na.omit(Prophet_Results)
+  pred <- rbind(pred, Prophet_Results )
+  # Re-size training and test data
+  prophet.Train <- FULL_df1[1:(1160+i),]
+  prophet.Test <- FULL_df1[(1161+i):(1161+i+ stepsAhead),]
+  
+}
+# Join Predicted and Actual Results
+all_results <- left_join(pred, Gold_Results,  by="Date")
+all_results
+
+# Print RMSE
+RMSE <- sqrt(mean((all_results$Close_Actual - all_results$Close_Prediction)^2))
+RMSE 
+
+```
+## Plot Forecast Values
+```{r}
+dyplot.prophet(m_ext, forecast_weekly)
+prophet_plot_components(m_ext, forecast_weekly)
+
+ p1_ext <- ggplot(all_results, aes(Date, Close_Actual, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Actual 1 Week  Price")
+  
+  
+  p2_ext <- ggplot(all_results, aes(Date, Close_Prediction, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Predicted 1 Week Gold Price")
+  
+  p_ext <- p1_ext + 
+    geom_point(mapping=p1_ext$mapping) +
+    geom_line(color='red') +
+    geom_point(mapping=p2_ext$mapping)+
+    geom_line(mapping=p2_ext$mapping, color='blue') +
+    ggtitle("Predicted(blue) vs Actual(red) - Rolling 1 Week - 1 Month Forecast")
+  p_ext
+  
+  
+  
+```
+
+
+
+## Buy/Sell Signal
+```{r, warning=FALSE}
+# Find local min and max to create buy/sell signals
+all_results$Index <- seq(1, nrow(all_results), by=1)
+vec <- all_results$Close_Prediction
+x <- locate_xtrem(vec)
+x <- x %>% 
+  select(c('Idx', 'Status')) %>%
+  rename(Index = Idx)
+all_results <- left_join(all_results, x,  by="Index")
+all_results <- all_results %>% 
+  select(c('Date', 'Close_Prediction', 'Close_Actual', 'Status'))
+all_results["Status"][all_results["Status"] == "min"] <- "Buy"
+all_results["Status"][all_results["Status"] == "max"] <- "Sell"
+Profit <- na.omit(all_results)
+
+# Calculate profit based on buy/sell signals
+Profit <- Profit %>%  
+  mutate(price_diff = Close_Actual - lag(Close_Actual, default = first(Close_Actual))) %>%  
+  filter(Status == 'Sell')
+
+sum(Profit$price_diff)  # TWEAK OR USE ONLINE CALC
+
+
+
+```
+
+
+## GOLD FORECAST ROLLOVER 1 Day
+Idea is that if we want to forecast 1 day ahead, we can use last weeks external values (1 day lag) to forecast gold prices. All data will be known, but continuous forecast require daily updates. The goal is to predict 1 day in advance, then training data gets expanded 1 day later with actual gold values, retrains model with actual data, and forecasts with 1 day lag predictors.
+```{r}
+# New dataframe with lagged predictors
+FULL_df2 <- subset(FULL_df, Date >= as.Date("2018-01-08"))
+
+# Lag External Regressors by 1 day
+FULL_df2$Silver_Close.x <- lag(FULL_df2$Silver_Close.x, n=1, default = NA)
+FULL_df2$DFF.x <- lag(FULL_df2$DFF.x, n=1, default = NA)
+FULL_df2$WM2NS.x <- lag(FULL_df2$WM2NS.x, n=1, default = NA)
+FULL_df2$hits.x <- lag(FULL_df2$hits.x, n=1, default = NA)
+FULL_df2$DJIA.x <- lag(FULL_df2$DJIA.x, n=1, default = NA)
+FULL_df2 <- subset(FULL_df2, Date >= as.Date("2018-02-12"))
+# Store lagged variables in future dataframe for prophet
+df_future <- FULL_df2 %>%
+  select(c('Date', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date)
+
+```
+
+
+
+```{r}
+# Partition data
+prophet.Train <- FULL_df2[1:1160,]
+prophet.Test <- FULL_df2[1161:1161,] 
+Results <- data.frame()
+pred <- data.frame()
+# Jump 1 day in advance
+stepsAhead <- 1
+# Forecasting for 20 periods aka 20 days
+periods_forecast <- 20
+length <- seq(1, stepsAhead * periods_forecast , by=stepsAhead)
+
+# Actual gold values
+Gold_Results <- gold %>%
+  select(c("Date","Gold_Close"))  %>%
+  rename(Close_Actual = Gold_Close)
+ 
+# Create for loop to retrain model with a new training set
+for(i in length) {
+  df3 <- prophet.Train %>%
+  select(c('Date', 'Gold_Close.x', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date, y = Gold_Close.x)
+  # Add regressor
+  m_ext <- prophet(seasonality.mode = "multiplicative", daily.seasonality = FALSE, interval.width = .90)
+  m_ext <- add_regressor(m_ext,  "Silver_Close.x", mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DFF.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'WM2NS.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'hits.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DJIA.x', mode = 'multiplicative', standardize = "auto")
+  #Fit Model
+  m_ext <- fit.prophet(m_ext, df3)
+  # Create future dataframe
+  future <- make_future_dataframe(m_ext, periods = 1, include_history = TRUE) %>% filter(!wday(ds) %in% c(1,7))
+  future <- left_join(future, df_future, by="ds")
+  # Forecast with model
+  forecast_weekly <- predict(m_ext, future) 
+  
+  # Return Results
+  Prophet_Results <- forecast_weekly %>%
+  select(c("ds","yhat")) %>%
+  rename(Date = ds, Close_Prediction = yhat)
+  Prophet_Results <- Prophet_Results[(nrow(prophet.Train)+1:(nrow(prophet.Train)+stepsAhead + 1)),]
+  Prophet_Results <- na.omit(Prophet_Results)
+  pred <- rbind(pred, Prophet_Results )
+  # Resize training data
+  prophet.Train <- FULL_df2[1:(1160+i),]
+  prophet.Test <- FULL_df2[(1161+i):(1161+i+ stepsAhead),]
+  
+}
+
+# Join Predicted and actual Results
+all_results <- left_join(pred, Gold_Results,  by="Date")
+all_results
+# RMse
+RMSE <- sqrt(mean((all_results$Close_Actual - all_results$Close_Prediction)^2))
+RMSE
+```
+## Plot Forecast
+```{r}
+# FOrecast plot
+dyplot.prophet(m_ext, forecast_weekly)
+# Plot components
+prophet_plot_components(m_ext, forecast_weekly)
+# Plot actual and predicted data
+ p1_ext <- ggplot(all_results, aes(Date, Close_Actual, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Actual 1 Week  Price")
+
+ p2_ext <- ggplot(all_results, aes(Date, Close_Prediction, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Predicted 1 Week Gold Price")
+ 
+p_ext <- p1_ext + 
+    geom_point(mapping=p1_ext$mapping) +
+    geom_line(color='red') +
+    geom_point(mapping=p2_ext$mapping)+
+    geom_line(mapping=p2_ext$mapping, color='blue') +
+    ggtitle("Predicted(blue) vs Actual(red) - Rolling 1 Day - 1 Month Forecast")
+ p_ext
+  
+
+```
+
+## Buy/Sell Signal
+```{r}
+all_results$Index <- seq(1, nrow(all_results), by=1)
+vec <- all_results$Close_Prediction
+x <- locate_xtrem(vec)
+x <- x %>% 
+  select(c('Idx', 'Status')) %>%
+  rename(Index = Idx)
+all_results <- left_join(all_results, x,  by="Index")
+all_results <- all_results %>% 
+  select(c('Date', 'Close_Prediction', 'Close_Actual', 'Status'))
+all_results["Status"][all_results["Status"] == "min"] <- "Buy"
+all_results["Status"][all_results["Status"] == "max"] <- "Sell"
+Profit <- na.omit(all_results)
+Profit <- Profit %>%  
+  mutate(price_diff = Close_Actual - lag(Close_Actual, default = first(Close_Actual))) %>%  
+  filter(Status == 'Sell')
+sum(Profit$price_diff) # TWEAK OR USE ONLINE CALC
+```
+
+## No Lag on Predictors (Check to see if external regressors help prediction if forecasted perfectly)
+```{r}
+# New dataframe with lagged predictors
+FULL_df2 <- subset(FULL_df, Date >= as.Date("2018-01-08"))
+
+# Lag External Regressors by 1 day
+FULL_df2$Silver_Close.x <- FULL_df2$Silver_Close.x
+FULL_df2$DFF.x <- FULL_df2$DFF.x
+FULL_df2$WM2NS.x <- FULL_df2$WM2NS.x
+FULL_df2$hits.x <- FULL_df2$hits.x
+FULL_df2$DJIA.x <- FULL_df2$DJIA.x
+FULL_df2 <- subset(FULL_df2, Date >= as.Date("2018-02-12"))
+# Store lagged variables in future dataframe for prophet
+df_future <- FULL_df2 %>%
+  select(c('Date', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date)
+
+```
+
+
+
+```{r}
+# Partition data
+prophet.Train <- FULL_df2[1:1160,]
+prophet.Test <- FULL_df2[1161:1161,] 
+Results <- data.frame()
+pred <- data.frame()
+# Jump 1 day in advance
+stepsAhead <- 1
+# Forecasting for 20 periods aka 20 days
+periods_forecast <- 20
+length <- seq(1, stepsAhead * periods_forecast , by=stepsAhead)
+
+# Actual gold values
+Gold_Results <- gold %>%
+  select(c("Date","Gold_Close"))  %>%
+  rename(Close_Actual = Gold_Close)
+ 
+# Create for loop to retrain model with a new training set
+for(i in length) {
+  df3 <- prophet.Train %>%
+  select(c('Date', 'Gold_Close.x', 'Silver_Close.x', "DFF.x", "WM2NS.x" , "hits.x", "DJIA.x")) %>%
+  rename(ds = Date, y = Gold_Close.x)
+  # Add regressor
+  m_ext <- prophet(seasonality.mode = "multiplicative", daily.seasonality = FALSE, interval.width = .90)
+  m_ext <- add_regressor(m_ext,  "Silver_Close.x", mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DFF.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'WM2NS.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'hits.x', mode = 'multiplicative', standardize = "auto")
+  m_ext <- add_regressor(m_ext,  'DJIA.x', mode = 'multiplicative', standardize = "auto")
+  #Fit Model
+  m_ext <- fit.prophet(m_ext, df3)
+  # Create future dataframe
+  future <- make_future_dataframe(m_ext, periods = 1, include_history = TRUE) %>% filter(!wday(ds) %in% c(1,7))
+  future <- left_join(future, df_future, by="ds")
+  # Forecast with model
+  forecast_weekly <- predict(m_ext, future) 
+  
+  # Return Results
+  Prophet_Results <- forecast_weekly %>%
+  select(c("ds","yhat")) %>%
+  rename(Date = ds, Close_Prediction = yhat)
+  Prophet_Results <- Prophet_Results[(nrow(prophet.Train)+1:(nrow(prophet.Train)+stepsAhead + 1)),]
+  Prophet_Results <- na.omit(Prophet_Results)
+  pred <- rbind(pred, Prophet_Results )
+  # Resize training data
+  prophet.Train <- FULL_df2[1:(1160+i),]
+  prophet.Test <- FULL_df2[(1161+i):(1161+i+ stepsAhead),]
+  
+}
+
+# Join Predicted and actual Results
+all_results <- left_join(pred, Gold_Results,  by="Date")
+all_results
+# RMse
+RMSE <- sqrt(mean((all_results$Close_Actual - all_results$Close_Prediction)^2))
+RMSE
+```
+## Plot Forecast
+```{r}
+# FOrecast plot
+dyplot.prophet(m_ext, forecast_weekly)
+# Plot components
+prophet_plot_components(m_ext, forecast_weekly)
+# Plot actual and predicted data
+ p1_ext <- ggplot(all_results, aes(Date, Close_Actual, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Actual 1 Week  Price")
+
+ p2_ext <- ggplot(all_results, aes(Date, Close_Prediction, group=1)) + 
+    geom_line() +
+    theme_light() + ggtitle("Predicted 1 Week Gold Price")
+ 
+p_ext <- p1_ext + 
+    geom_point(mapping=p1_ext$mapping) +
+    geom_line(color='red') +
+    geom_point(mapping=p2_ext$mapping)+
+    geom_line(mapping=p2_ext$mapping, color='blue') +
+    ggtitle("Predicted(blue) vs Actual(red) - Rolling 1 Day Forecast (No Lagged Predictors)")
+ p_ext
+  
+
+```
+
+## Buy/Sell Signal
+```{r}
+all_results$Index <- seq(1, nrow(all_results), by=1)
+vec <- all_results$Close_Prediction
+x <- locate_xtrem(vec)
+x <- x %>% 
+  select(c('Idx', 'Status')) %>%
+  rename(Index = Idx)
+all_results <- left_join(all_results, x,  by="Index")
+all_results <- all_results %>% 
+  select(c('Date', 'Close_Prediction', 'Close_Actual', 'Status'))
+all_results["Status"][all_results["Status"] == "min"] <- "Buy"
+all_results["Status"][all_results["Status"] == "max"] <- "Sell"
+Profit <- na.omit(all_results)
+Profit <- Profit %>%  
+  mutate(price_diff = Close_Actual - lag(Close_Actual, default = first(Close_Actual))) %>%  
+  filter(Status == 'Sell')
+sum(Profit$price_diff) # TWEAK OR USE ONLINE CALC
+```
