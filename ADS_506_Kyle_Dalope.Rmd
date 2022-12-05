@@ -1,0 +1,549 @@
+---
+title: "Gold Prediction ADS 506 Project 2"
+author: "Kyle"
+date: "11/26/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#install.packages("Quandl")
+#install.packages("plotly")
+#install.packages("DT")
+#install.packages("gtrendsR")
+#install.packages("tidytext")
+#install.packages("imputeTS")
+#install.packages("Metrics")
+#install.packages("TTR")
+#install.packages("prophet")
+
+library(fpp2) 
+library(zoo)
+library(tidyr)
+library(ggplot2)
+library(readr)
+library(dplyr)
+library(rvest)
+library(Quandl)
+library(plotly)
+library(ggplot2)
+library(DT)
+library(gtrendsR)
+library(tidytext)
+library(stringr)
+library(lubridate)
+library(prophet)
+library(imputeTS)
+library(corrplot) 
+library(Metrics)
+library(quantmod)
+```
+
+```{r}
+# Load Data
+#gold <- read_csv("/Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final #Project/Gold_Nasdaq_Max.csv", 
+#    col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+#
+#unemp <- read_csv("/Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final #Project/UNRATE.csv", show_col_types = FALSE)
+#
+#M2 <- read_csv("/Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final #Project/WM2NS.csv", show_col_types = FALSE)
+#
+#DJ <- read_csv("//Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final Project/DJIA #(1).csv",  show_col_types = FALSE)                
+#
+#fed_funds <- read_csv("/Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final #Project/FederalFunds.csv", show_col_types = FALSE)
+#
+#silver <- Quandl('LBMA/SILVER')
+#
+#dollar_index <- read_csv("/Users/ryan_s_dunn/Documents/USD MS-ADS/Applied Time Series Analysis ADS 506/Final #Project/US Dollar Index Historical Data.csv", col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+
+
+gold <- read_csv("Gold.csv", 
+    col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+
+unemp <- read_csv("UNRATE.csv", show_col_types = FALSE)
+
+M2 <- read_csv("WM2NS.csv", show_col_types = FALSE)
+
+DJ <- read_csv("DJIA.csv",  show_col_types = FALSE)                
+
+fed_funds <- read_csv("DFF.csv", show_col_types = FALSE)
+
+silver <- Quandl('LBMA/SILVER')
+
+dollar_index <- read_csv("US Dollar Index Historical Data.csv", col_types = cols(Date = col_date(format = "%m/%d/%Y")))
+
+Google <- read_csv("Gold_Trend_hits.csv", show_col_types = FALSE)
+```
+
+```{r, warning=FALSE}
+#edit the column names in data frames 
+Price_plot <- gold %>%
+  plot_ly(x = ~Date,
+          type = "candlestick", 
+          open = ~Open, 
+          close = ~`Close/Last`, 
+          high = ~High,
+          low = ~Low,
+          name = "price") %>%
+  layout(
+    xaxis = list(
+      rangeselector = list(
+        buttons = list(
+          list(
+            count = 3,
+            label = "3 mo",
+            step = "month",
+            stepmode = "backward"),
+          list(
+            count = 6,
+            label = "6 mo",
+            step = "month",
+            stepmode = "backward"),
+          list(
+            count = 1,
+            label = "1 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 2,
+            label = "2 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 3,
+            label = "3 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(
+            count = 5,
+            label = "5 yr",
+            step = "year",
+            stepmode = "backward"),
+          list(step = "all"))),
+      
+      rangeslider = list(visible = FALSE)),
+         yaxis = list(title = "Price ($)",
+                      showgrid = TRUE,
+                      showticklabels = TRUE))
+Volume <- select(gold, Date, Volume)
+Volume$Date <- as.Date(Volume$Date , format = "%m/%d/%y")
+Volume$Vol <- as.numeric(as.character(Volume$Volume)) / 1000
+Volume_plot <- Volume %>%
+  plot_ly(x=~Date, y=~Vol, type='bar', name = "Volume") %>%
+  layout(yaxis = list(title = "Volume (Units of Thousand)"))
+plot <- subplot(Price_plot, Volume_plot, heights = c(0.7,0.3), nrows=2,
+             shareX = TRUE, titleY = TRUE) %>%
+  layout(title = 'GC:CMX')
+plot
+```
+
+#### Adjust data types where needed 
+```{r}
+#change data type from chr to date in the gold data set
+gold$Date <- as.Date(gold$Date, format = "%m/%d/%y")
+gold$DATE <- gold$Date
+#change the datatype to date in the DJIA data set
+DJ$DATE <- as.Date(DJ$DATE, format = "%m/%d/%y")
+#indicate columns to keep in gold data set
+keep_cols <-  c("Date","Close/Last", 'Volume')
+gold <- gold[keep_cols] 
+gold <- gold %>%
+  rename(Gold_Close = 'Close/Last', Gold_Volume ='Volume')
+#head(gold)
+```
+#### Create the daily M2 rate data frame (in billions)
+```{r}
+#create all dates from the date column in the data frame
+all_dates <- M2 %>%select(DATE) %>% 
+  complete(DATE=  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+M2_daily <- left_join(all_dates,M2,by="DATE")
+#fill the NA values from the join with the first value from the dataset
+
+
+M2_daily <- na_locf(M2_daily, option = "locf")
+#M2_daily <- na.locf(M2_daily, fromLast = TRUE)
+
+
+keep_cols <- c("DATE", "WM2NS")
+M2_daily <- M2_daily[keep_cols]
+M2_daily <- M2_daily %>%
+  select(c("DATE","WM2NS")) %>%
+  rename(Date = DATE)
+#head(M2_daily)                      
+```
+
+#### Create the daily unemployment rate data frame
+```{r}
+#create all dates from the date column in the dataframe
+all_dates <- unemp %>%select(DATE) %>% 
+  complete(DATE=  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+unemp_daily <- left_join(all_dates,unemp,by="DATE")
+
+#fill the NA values from the join with the first value from the dataset
+unemp_daily <- na_locf(unemp_daily,  option = "locf")
+#unemp_daily <- na.locf(unemp_daily, fromLast = TRUE)
+
+keep_cols <- c("DATE", "UNRATE")
+unemp_daily <- unemp_daily[keep_cols]
+unemp_daily <- unemp_daily %>%
+  select(c("DATE","UNRATE")) %>%
+  rename(Date = DATE)
+#head(unemp_daily) 
+```
+
+#### Create the daily federal funds data frame
+```{r}
+#create all dates from the date column in the data frame
+all_dates <- fed_funds %>%select(observation_date) %>% 
+  complete(observation_date =  seq.Date(min(observation_date), max(observation_date), by="day"),
+           ) %>% mutate(TIME=paste(year(observation_date),str_pad(month(observation_date), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original dataframe
+ff_daily <- left_join(all_dates,fed_funds,by="observation_date")
+
+#fill the NA values from the join with the first value from the dataset
+ff_daily <- na_locf(ff_daily, option = "locf")
+#ff_daily <- na.locf(ff_daily, fromLast = TRUE)
+
+keep_cols <- c("observation_date", "DFF")
+ff_daily <- ff_daily[keep_cols]
+ff_daily <- ff_daily %>%
+  select(c("observation_date","DFF")) %>%
+  rename(Date = observation_date)
+#head(ff_daily) 
+```
+#### Create the daily Dow Jones IA data frame
+```{r}
+
+#create all dates from the date column in the data frame
+all_dates <- DJ %>%select(DATE) %>% 
+  complete(DATE =  seq.Date(min(DATE), max(DATE), by="day"),
+           ) %>% mutate(TIME=paste(year(DATE),str_pad(month(DATE), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+dj_daily <- left_join(all_dates, DJ ,by="DATE")
+
+#fill the NA values from the join with the first value from the dataset
+dj_daily <- na_locf(dj_daily,  option = "locf")
+#dj_daily <- na.locf(dj_daily, fromLast = TRUE)
+
+keep_cols <- c("DATE", "DJIA")
+dj_daily <- dj_daily[keep_cols]
+dj_daily <- dj_daily %>%
+  select(c("DATE", "DJIA")) %>%
+  rename(Date = DATE)
+#head(dj_daily) 
+```
+
+#### Silver
+
+```{r}
+# add in Silver
+silver <- silver[,c('Date', 'USD')]
+silver <- silver %>%
+  rename(Silver_Close = 'USD')
+Metals <- inner_join(silver, gold, by="Date")
+```
+
+### Dollar Index
+```{r}
+# Add in Dollar Index
+dollar_index <- dollar_index %>%
+  select(c("Date","Price")) %>%
+  rename(DXY = Price)
+#dollar_index$Date <- as.Date(dollar_index$Date, format = "%m/%d/%y")
+```
+
+#### Google trends
+```{r}
+#trends <- gtrends(keyword = "Gold", onlyInterest = TRUE, time = "today+5-y")
+
+
+#create all dates from the date column in the data frame
+all_dates <- Google %>%select(Date) %>% 
+  complete(Date =  seq.Date(min(Date), max(Date), by="day"),
+           ) %>% mutate(TIME=paste(year(Date),str_pad(month(Date), 2, pad = "0"),sep = "-"))
+#join the all_dates object back onto original datafarme
+Google_daily <- left_join(all_dates, Google ,by="Date")
+
+#fill the NA values from the join with the first value from the dataset
+Google_daily <- na_locf(Google_daily,  option = "locf")
+
+
+keep_cols <- c("Date", "Gold: (Worldwide)")
+Google_daily <- Google_daily[keep_cols]
+Google_daily <- Google_daily %>%
+  select(c("Date", "Gold: (Worldwide)")) %>%
+  rename(hits = 'Gold: (Worldwide)')
+
+
+Google_daily %>%  
+  plot_ly(type='scatter',x=~Date, y=~hits, mode = 'lines', name = "Google Search Trends") %>%
+  layout(title = paste0("Interest over Time: ", "Gold"), yaxis = list(title = "hits"))
+
+trends_daily <- Google_daily
+# Hits verse Gold 
+trends_daily %>%
+  left_join(gold, by = "Date") %>%
+  select(one_of(c("Date", "hits", "Gold_Close"))) %>%
+  drop_na() %>%
+  ggplot(aes(hits, Gold_Close)) + geom_point(color="red") + geom_smooth(method = 'loess') +
+  labs(title =paste0("Gold",": Relationship between World Interest (Hits) and Close Price (Gold)"))
+
+```
+
+
+#### Merge data frames and create the final dataframe for EDA
+```{r}
+#merge the dataframes together on dates
+full_df <- left_join(Metals, dollar_index, by="Date")
+full_df <- left_join(full_df, unemp_daily, by="Date")
+full_df <- left_join(full_df, ff_daily, by="Date")
+full_df <- left_join(full_df, M2_daily, by="Date")
+full_df <- left_join(full_df, Google_daily, by="Date")
+full_df <- left_join(full_df, dj_daily, by="Date")
+full_df <- left_join(full_df, trends_daily, by="Date")
+full_df$Gold_Volume <- na_ma(full_df$Gold_Volume, k=1, weighting = "simple")
+
+keep_cols <- c("Date", "Silver_Close", "Gold_Close","Gold_Volume", "DXY", "UNRATE", "DFF", "WM2NS" ,"hits.x",     "DJIA")     
+
+full_df <- full_df[keep_cols]
+full_df <- full_df %>%
+  rename(hits = hits.x)
+```
+
+```{r}
+# Check for any NA Values
+cbind(
+   lapply(
+     lapply(full_df, is.na)
+     , sum)
+   )
+```
+#### Subset the data frame with values from 2018 forward
+```{r}
+
+full_df <- full_df %>% arrange(ymd(full_df$Date))
+full_df <- full_df[full_df$Date >= "2018-01-01",]
+#Replace NA with the most recent value
+full_df$WM2NS <- zoo::na.fill(full_df$WM2NS, "extend")
+full_df$hits <- zoo::na.fill(full_df$hits, "extend")
+full_df$UNRATE <- zoo::na.fill(full_df$UNRATE, "extend")
+tail(full_df)
+```
+
+
+```{r}
+# Check for any NA Values
+cbind(
+   lapply(
+     lapply(full_df, is.na)
+     , sum)
+   )
+```
+
+#### Create the correlation matrix for EDA 
+```{r}
+#correlation matrix of all predictors to gold 
+#corr_fields <- c("Gold_Close", 'Gold_Volume', 'Silver_Close', 'hits', "UNRATE","DFF","WM2NS", "DJIA")
+#corr_fields <- c("Gold_Close", 'Gold_Volume', 'Silver_Close',  "UNRATE","DFF","WM2NS","DJIA")
+corr_fields <- c("Gold_Close", "Silver_Close","Gold_Volume", "DXY", "UNRATE", "DFF", "WM2NS" ,"hits", "DJIA")     
+full_df$Gold_Volume <- as.numeric(full_df$Gold_Volume)
+full_df$WM2NS <- as.numeric(full_df$WM2NS)
+full_df$hits <- as.numeric(full_df$hits)
+
+full_df$Gold_Volume <- na_ma(full_df$Gold_Volume, k=1, weighting = "simple")
+full_df$WM2NS <- na_ma(full_df$WM2NS, k=1, weighting = "simple")
+full_df$hits <- na_ma(full_df$hits, k=1, weighting = "simple")
+```
+```{r}
+corr_df <- full_df[corr_fields]
+corr_matrix = cor(corr_df)
+#display first row of correlation matrix
+corr_matrix[,1]
+```
+
+```{r}
+#develop the corrplot correlation matrix
+corrplot(corr_matrix)
+```
+#### Normalize variables for EDA
+```{r}
+#normalize variables to view scaled relationships and add into full_df
+full_df_Norm <- full_df
+full_df_Norm[-1] <- lapply(full_df_Norm[-1], scale)
+```
+
+#### EDA with non-normalized varialbes
+````{r}
+#scatterplot of gold & each external variable
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = UNRATE, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Unemployment Rate (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = DFF, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Federal Funds Rate (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = WM2NS, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and M2 Money Supply (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = DJIA, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and DJIA (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = Gold_Volume, color = Date)) + 
+  ggtitle("Scatterplot of Gold Close Price and Gold Volume (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = Silver_Close, color = Date)) + 
+  ggtitle("Scatterplot of Gold_Close and Silver_Close (Date Color)")
+
+ggplot(data = full_df) +
+  geom_point(mapping = aes(x = Gold_Close,
+                            y = hits, color = Date)) + 
+  ggtitle("Scatterplot of Gold_Close and Hits (Date Color)")
+```
+#### Create dataframe for Normalize EDA (on same axis)
+```{r}
+#create time series objects for each of the normalized data elements 
+gold_ts_norm <- ts(full_df_Norm$Gold_Close, start = c(2018, 01), frequency = 252)
+unemp_ts_norm <- ts(full_df_Norm$UNRATE, start = c(2018, 01), frequency = 252)
+ff_ts_norm <- ts(full_df_Norm$DFF, start = c(2018, 01), frequency = 252)
+M2_ts_norm <- ts(full_df_Norm$WM2NS, start = c(2018, 01), frequency = 252)
+dj_ts_norm <- ts(full_df_Norm$DJIA, start = c(2018, 01), frequency = 252)
+silver_ts_norm <- ts(full_df_Norm$Silver_Close, start = c(2018, 01), frequency = 252)
+hits_ts_norm <- ts(full_df_Norm$hits, start = c(2018, 01), frequency = 252)
+gold_vol_ts_norm <- ts(full_df_Norm$Gold_Volume, start = c(2018, 01), frequency = 252)
+```
+
+```{r}
+#line chart of all indicators
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Unemployment Rate", xlab = "Date") + 
+  autolayer(unemp_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Federal Funds Rate", xlab = "Date") + 
+  autolayer(ff_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold Close and M2", xlab = "Date") + 
+  autolayer(M2_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and DJIA", xlab = "Date") + 
+  autolayer(dj_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Silver Close", xlab = "Date") + 
+  autolayer(silver_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Hits", xlab = "Date") + 
+  autolayer(hits_ts_norm) + theme_classic()
+
+autoplot(gold_ts_norm, main = "5-Year Trend of Gold and Gold Volume", xlab = "Date") + 
+  autolayer(gold_vol_ts_norm) + theme_classic()
+
+
+
+```
+
+#### Boxplot to identify outlier variables 
+```{r}
+#boxplot of all varialbes  
+ggplot(corr_df, aes(x=Gold_Close)) +
+  geom_boxplot() + ggtitle("Gold Boxplot") + xlab("Gold Closing Price")
+
+ggplot(corr_df, aes(x=UNRATE)) +
+  geom_boxplot() + ggtitle("Unemployement Rate Boxplot") + xlab("Unemployement Rate")
+
+ggplot(corr_df, aes(x=DFF)) +
+  geom_boxplot() + ggtitle("Federal Funds Rate Boxplot") + xlab("Federal Funds Rate")
+
+ggplot(corr_df, aes(x=WM2NS)) +
+  geom_boxplot() + ggtitle("M2 Money Supply Boxplot") + xlab("M2 Total Money Supply")
+
+ggplot(corr_df, aes(x=DJIA)) +
+  geom_boxplot() + ggtitle("DJIA Boxplot") + xlab("Dow Jones Industrial Average")
+
+ggplot(corr_df, aes(x=Gold_Volume)) +
+  geom_boxplot() + ggtitle("Gold Volume Boxplot") + xlab("Gold Volume")
+
+ggplot(corr_df, aes(x=Silver_Close)) +
+  geom_boxplot() + ggtitle("Silver Close Boxplot") + xlab("Silver Close")
+
+ggplot(corr_df, aes(x=hits)) +
+  geom_boxplot() + ggtitle("Hits Boxplot") + xlab("Hits")
+```
+
+### Full entire Dataset
+
+```{r}
+FULL_df  <- left_join(full_df, full_df_Norm, by="Date")
+FULL_df
+tail(FULL_df)
+```
+
+### Partition the data into training and testing
+```{r}
+#create the time series object for the FULL_df
+ts_FULL_df <- ts(data=FULL_df$Gold_Close.x, start = c(2018,01), frequency = 252)
+train_df <- window(ts_FULL_df, end = c(2022,150)) #161 is end of Aug
+test_df <-  window(ts_FULL_df, start = c(2022,151))
+
+#validate the train and test layers connect
+autoplot(train_df) + autolayer(test_df) +
+  #coord_cartesian(xlim = c(2022,2023)) +
+  labs(title = "2022 - 2023 Gold Close Price (Train & Test)",
+       x = "Time", y = "Gold Close Price")
+test_df
+```
+
+```{r}
+#moving average model
+nValid <- 12
+ma.trailing <- rollmean(train_df, k = 12, align = "right")
+last.ma <- tail(ma.trailing, 1)
+ma.trailingTEST <- ts(rep(last.ma, nValid), test_df, freq = 12)
+
+plot(train_df, ylim = c(1100, 2200), ylab = "Gold Close Price", xlab = "Time", xlim = c(2018, 2023), main = "")
+axis(1, at = seq(2018, 2023, 1), labels = format(seq(2018, 2023, 1)))
+lines(ma.trailing, lwd = 2, col = "red", lty = 2)
+lines(ma.trailingTEST, lwd = 2, col = "blue", lty = 2)
+lines(test_df)
+
+summary(ma.trailingTEST)
+
+```
+
+```{r}
+#Simple Moving Average with QUANTMOD
+getSymbols("GOLD", from = "2018-01-02")
+chartSeries(GOLD)
+addSMA(50)
+
+ma <- SMA(Cl(GOLD), 50) # ma of adjusted close
+accuracy(Cl(GOLD), ma)
+```
+
+```{r}
+#install.packages("cli")
+df <- data.frame(ds = (FULL_df['Date']),
+                 y = (FULL_df['Gold_Close.x']))
+colnames(df) <- c('ds', 'y')
+
+m <- prophet(df, daily.seasonality=TRUE)
+future <- make_future_dataframe(m, periods = 252)
+forecast <- predict(m, future)
+plot(m, forecast)
+
+prophet_plot_components(m, forecast)
+```
+
+
