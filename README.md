@@ -29,3 +29,8 @@ For this study, all work and processing was conducted through the programming la
 
 All predictor datasets were left joined onto the Gold.csv file by date; however, not all data was available at the daily level. For some predictor variables, such as the unemployment rate, data is only updated monthly. To address this misalignment in data granularity, the MIN and MAX date of each dataset was captured, and a date object was created which contained all days in between. By using the mutate function and na_locf functions in base R, the most recent value for a given predictor variable was used to fill in all daily date ranges until a new value was found. This enabled the data to be downloaded at various levels and mutated into a daily level that was able to be joined onto the daily gold data. Each data attribute was then normalized for the purposes of comparing trends on a single axis and for potential use in predictive models that require the data be on the same scale.  
 
+### Data Sources
+* Gold Historical Data:  https://www.nasdaq.com/market-activity/commodities/gc:cmx/historical
+* Silver Historical Data:  https://www.nasdaq.com/market-activity/commodities/si:cmx/historical
+* FRED Economic Data:  https://fred.stlouisfed.org/
+* Gold Googld Trends:  https://trends.google.com/trends/?geo=US
