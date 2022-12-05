@@ -23,6 +23,7 @@ In this study, the topic that will be investigated and forecasted will be gold p
 
 * R
 * R Studio
+* R Markdown
 
 ### Project Description 
 
